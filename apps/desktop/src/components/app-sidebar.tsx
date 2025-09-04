@@ -6,6 +6,7 @@ import {
   MagnifyingGlass,
   Package,
   Sparkle,
+  UploadSimple,
 } from '@phosphor-icons/react';
 import { open } from '@tauri-apps/plugin-shell';
 import { Link, useLocation } from 'react-router';
@@ -81,6 +82,12 @@ const items: SidebarItem[] = [
     icon: Download,
   },
   {
+    id: 'add-mods',
+    title: () => <span>Add Mods</span>,
+    url: '/add-mods',
+    icon: UploadSimple,
+  },
+  {
     id: 'settings',
     title: () => <span>Settings</span>,
     url: '/settings',
@@ -99,7 +106,6 @@ const DownloadProgress = () => {
     return null;
   }
 
-  // Calculate the combined progress of all downloads
   let totalProgress = 0;
   let modsWithProgress = 0;
 

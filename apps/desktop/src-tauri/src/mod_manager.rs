@@ -359,10 +359,10 @@ impl ModManager {
             log::warn!("Mod {} already installed", deadlock_mod.name);
             return Err(Error::ModAlreadyInstalled(deadlock_mod.name));
         }
+
         if let Some(game_path) = &self.game_path {
             let mod_files_path = deadlock_mod.path.join("files");
 
-            // clear per-mod cache
             if mod_files_path.exists() {
                 log::info!("Clearing existing mod cache at: {:?}", mod_files_path);
                 fs::remove_dir_all(&mod_files_path)?;
@@ -370,43 +370,82 @@ impl ModManager {
             fs::create_dir_all(&mod_files_path)?;
             log::info!("Created mod files directory at: {:?}", mod_files_path);
 
-            // unpack archives into cache, collect VPK names
-            let mut all_vpks = Vec::new();
+            let mut all_vpks: Vec<String> = Vec::new();
+            let mut direct_vpks: Vec<PathBuf> = Vec::new();
+
             for entry in fs::read_dir(&deadlock_mod.path)? {
                 let entry = entry?;
                 let path = entry.path();
 
-                let temp_dir = tempfile::tempdir()?;
-                log::info!("Processing archive: {:?}", path);
-
-                match path.extension().and_then(|e| e.to_str()) {
-                    Some("zip") => self.extract_zip(&path, temp_dir.path())?,
-                    Some("rar") => self.extract_rar(&path, temp_dir.path())?,
-                    Some("7z") => self.extract_7z(&path, temp_dir.path())?,
-                    _ => continue,
+                if path.is_dir() {
+                    continue;
                 }
 
-                log::info!("Copying VPKs to mod cache…");
-                let mut vpks = self.copy_vpks_from_temp(temp_dir.path(), &mod_files_path)?;
-                all_vpks.append(&mut vpks);
+                match path.extension().and_then(|e| e.to_str()) {
+                    Some("zip") => {
+                        let temp_dir = tempfile::tempdir()?;
+                        log::info!("Processing archive: {:?}", path);
+                        self.extract_zip(&path, temp_dir.path())?;
+                        log::info!("Copying VPKs to mod cache…");
+                        let mut vpks = self.copy_vpks_from_temp(temp_dir.path(), &mod_files_path)?;
+                        all_vpks.append(&mut vpks);
+                    }
+                    Some("rar") => {
+                        let temp_dir = tempfile::tempdir()?;
+                        log::info!("Processing archive: {:?}", path);
+                        self.extract_rar(&path, temp_dir.path())?;
+                        log::info!("Copying VPKs to mod cache…");
+                        let mut vpks = self.copy_vpks_from_temp(temp_dir.path(), &mod_files_path)?;
+                        all_vpks.append(&mut vpks);
+                    }
+                    Some("7z") => {
+                        let temp_dir = tempfile::tempdir()?;
+                        log::info!("Processing archive: {:?}", path);
+                        self.extract_7z(&path, temp_dir.path())?;
+                        log::info!("Copying VPKs to mod cache…");
+                        let mut vpks = self.copy_vpks_from_temp(temp_dir.path(), &mod_files_path)?;
+                        all_vpks.append(&mut vpks);
+                    }
+                    Some("vpk") => {
+                        log::info!("Found direct VPK in root: {:?}", path);
+                        direct_vpks.push(path.clone());
+                    }
+                    _ => {
+                    }
+                }
             }
-            if all_vpks.is_empty() {
+
+            if !direct_vpks.is_empty() {
+                direct_vpks.sort();
+                let mut current_number = self.find_highest_vpk_number(&mod_files_path)?;
+                for vpk in direct_vpks {
+                    current_number += 1;
+                    let new_name = format!("pak{:02}_dir.vpk", current_number);
+                    let new_path = mod_files_path.join(&new_name);
+                    fs::copy(&vpk, &new_path)?;
+                    all_vpks.push(new_name);
+                }
+            }
+
+           let has_vpk_in_files = fs::read_dir(&mod_files_path)?
+            .filter_map(|e| e.ok())
+                .any(|e| e.path().extension().map_or(false, |ext| ext == "vpk"));
+
+            if all_vpks.is_empty() && !has_vpk_in_files {
                 log::error!("No VPK files found in mod");
                 return Err(Error::ModInvalid("No VPK files found in mod".into()));
             }
 
-            // append into game addons and record
             let addons_path = game_path.join("game").join("citadel").join("addons");
             log::info!("Installing VPKs to game addons: {:?}", addons_path);
             let installed_vpks = self.copy_vpks_from_temp(&mod_files_path, &addons_path)?;
 
             deadlock_mod.installed_vpks = installed_vpks;
-            log::info!("Adding mod to managed mods list");
-            self.mods
-                .insert(deadlock_mod.id.clone(), deadlock_mod.clone());
+           log::info!("Adding mod to managed mods list");
+           self.mods.insert(deadlock_mod.id.clone(), deadlock_mod.clone());
 
-            log::info!("Mod installation completed successfully");
-            Ok(deadlock_mod)
+           log::info!("Mod installation completed successfully");
+           Ok(deadlock_mod)
         } else {
             log::error!("Game path not set");
             Err(Error::GamePathNotSet)

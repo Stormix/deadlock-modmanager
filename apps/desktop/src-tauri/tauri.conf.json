@@ -12,11 +12,12 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "Deadlock Mod Manager",
         "width": 1280,
         "height": 720,
         "decorations": false,
-        "label": "main"
+        "dragDropEnabled": false
       }
     ],
     "security": {
@@ -41,11 +42,6 @@
       "endpoints": [
         "https://github.com/stormix/deadlock-modmanager/releases/latest/download/latest.json"
       ]
-    },
-    "deepLink": {
-      "desktop": {
-        "schemes": ["deadlock-mod-manager", "deadlock-modmanager"]
-      }
     }
   }
 }
