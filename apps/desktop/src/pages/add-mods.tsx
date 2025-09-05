@@ -8,6 +8,7 @@ import JSZip from 'jszip';
 
 import { appLocalDataDir, join } from '@tauri-apps/api/path';
 import { BaseDirectory, exists, mkdir, writeFile, readDir } from '@tauri-apps/plugin-fs';
+import { invoke } from '@tauri-apps/api/core';
 
 import PageTitle from '@/components/page-title';
 import { Button } from '@/components/ui/button';
@@ -24,11 +25,11 @@ import { cn } from '@/lib/utils';
 import ModMetadataForm, { type ModMetadata, type ModMetadataFormHandle } from '@/components/mod-metadata-form';
 import { usePersistedStore } from '@/lib/store';
 import { ModStatus } from '@/types/mods';
+import { useProgress } from '@/components/progress-indicator';
 
 type DetectedSource =
   | { kind: 'archive'; file: File }
-  | { kind: 'vpk'; file: File }
-  | { kind: 'folder-vpk'; files: File[]; folderName?: string };
+  | { kind: 'vpk'; file: File };
 
 const isGameBananaUrl = (url: string) => /^https?:\/\/(www\.)?gamebanana\.com\//i.test(url.trim());
 const fileName = (file: File) => (file as any).webkitRelativePath || file.name;
@@ -45,13 +46,6 @@ const detectSource = (files: File[]): DetectedSource | null => {
   if (flat.length === 1 && vpk) return { kind: 'vpk', file: vpk };
   const archive = flat.find((f) => /\.(zip|rar|7z)$/i.test(f.name));
   if (flat.length === 1 && archive) return { kind: 'archive', file: archive };
-  const anyVpk = flat.filter((f) => /\.vpk$/i.test(f.name));
-  if (anyVpk.length >= 1) {
-    const first = anyVpk[0] as any;
-    const rel = first.webkitRelativePath as string | undefined;
-    const folderName = rel ? rel.split('/')[0] : undefined;
-    return { kind: 'folder-vpk', files: anyVpk, folderName };
-  }
   return null;
 };
 
@@ -103,7 +97,7 @@ const readFromDataTransferItems = async (items: DataTransferItemList): Promise<F
 
 const addModSchema = z.object({
   category: z.nativeEnum(ModCategory),
-  sourceType: z.enum(['url', 'archive', 'vpk', 'folder-vpk']),
+  sourceType: z.enum(['url', 'archive', 'vpk']),
   url: z.string().optional(),
 });
 type AddModValues = z.infer<typeof addModSchema>;
@@ -117,6 +111,7 @@ const AddMods = () => {
   const metaRef = useRef<ModMetadataFormHandle>(null);
 
   const { addMod, setModPath, setModStatus } = usePersistedStore();
+  const { setProcessing, isProcessing, processingStatus } = useProgress();
 
   const form = useForm<AddModValues>({
     resolver: zodResolver(addModSchema),
@@ -144,9 +139,7 @@ const AddMods = () => {
       const n =
         ds.kind === 'archive'
           ? ds.file.name.replace(/\.(zip|rar|7z)$/i, '')
-          : ds.kind === 'vpk'
-          ? ds.file.name.replace(/\.vpk$/i, '')
-          : ds.folderName || ds.files[0]?.name.replace(/\.vpk$/i, '') || '';
+          : ds.file.name.replace(/\.vpk$/i, '');
       setDetected(ds as DetectedSource);
       form.reset({ category: ModCategory.SKINS, sourceType: (ds as DetectedSource).kind, url: undefined });
       setInitialMeta({ name: n || '' });
@@ -180,26 +173,39 @@ const AddMods = () => {
   };
 
   const finalize = async () => {
+    setProcessing(true, 'Validating mod metadata...');
+    
     const meta = await metaRef.current?.validateAndGet();
-    if (!meta) return;
+    if (!meta) {
+      setProcessing(false);
+      return;
+    }
     const category = form.getValues('category');
 
     if (form.getValues('sourceType') === 'url') {
       toast.info('URL flow is handled by the API pipeline.');
       setOpen(false);
+      setProcessing(false);
       return;
     }
-    if (!detected) { toast.error('No files detected.'); return; }
+    if (!detected) { 
+      toast.error('No files detected.'); 
+      setProcessing(false);
+      return; 
+    }
 
     const modId = `local-${crypto.randomUUID()}`;
     const base = await appLocalDataDir();
     const modsRoot = await join(base, 'mods');
     const modDir = await join(modsRoot, modId);
     const filesDir = await join(modDir, 'files');
+    
+    setProcessing(true, 'Creating mod directories...');
     await ensureDir(modsRoot);
     await ensureDir(modDir);
     await ensureDir(filesDir);
 
+    setProcessing(true, 'Processing preview image...');
     let previewName = 'preview.svg';
     if (meta.imageFile) {
       const extMatch = meta.imageFile.name.match(/\.(png|jpe?g|webp|gif|svg)$/i);
@@ -211,25 +217,50 @@ const AddMods = () => {
       await writeText(await join(modDir, previewName), FALLBACK_SVG);
     }
 
+    setProcessing(true, 'Processing mod files...');
+
     try {
       if (detected.kind === 'vpk') {
+        console.log('Processing VPK file:', detected.file.name);
         await writeBytes(await join(filesDir, detected.file.name), await toBytes(detected.file));
-      } else if (detected.kind === 'folder-vpk') {
-        const first = detected.files.sort((a, b) => fileName(a).localeCompare(fileName(b))).find((f) => /\.vpk$/i.test(f.name));
-        if (!first) throw new Error('No .vpk found in folder');
-        await writeBytes(await join(filesDir, first.name), await toBytes(first));
+        console.log('VPK file written to files directory');
       } else if (detected.kind === 'archive') {
         const name = detected.file.name.toLowerCase();
         if (name.endsWith('.zip')) {
+          console.log('Processing ZIP archive:', detected.file.name);
           const zip = await JSZip.loadAsync(await detected.file.arrayBuffer());
           const entry = Object.values(zip.files).find((f) => !f.dir && /\.vpk$/i.test(f.name));
           if (!entry) {
+            console.log('No VPK found in ZIP, storing archive');
             await writeBytes(await join(modDir, detected.file.name), await toBytes(detected.file));
             toast.error('No .vpk found inside .zip – stored archive for installer');
           } else {
+            console.log('Found VPK in ZIP:', entry.name);
             const buf = await entry.async('uint8array');
             const baseName = entry.name.split('/').pop() || 'mod.vpk';
             await writeBytes(await join(filesDir, baseName), buf);
+            console.log('VPK extracted to files directory:', baseName);
+          }
+        } else if (name.endsWith('.rar') || name.endsWith('.7z')) {
+          // Store archive and extract it immediately
+          console.log('Storing and extracting archive:', detected.file.name);
+          setProcessing(true, `Storing ${name.split('.').pop()?.toUpperCase()} archive...`);
+          await writeBytes(await join(modDir, detected.file.name), await toBytes(detected.file));
+          
+          // Extract archive using backend
+          try {
+            setProcessing(true, `Extracting ${name.split('.').pop()?.toUpperCase()} archive...`);
+            const archivePath = await join(modDir, detected.file.name);
+            const extractedVpks = await invoke('extract_archive', { 
+              archivePath: await archivePath, 
+              targetPath: await filesDir 
+            });
+            
+            console.log('Extracted VPK files:', extractedVpks);
+            toast.success(`${name.split('.').pop()?.toUpperCase()} archive extracted successfully`);
+          } catch (error) {
+            console.error('Failed to extract archive:', error);
+            toast.error('Failed to extract archive');
           }
         } else {
           await writeBytes(await join(modDir, detected.file.name), await toBytes(detected.file));
@@ -243,12 +274,40 @@ const AddMods = () => {
       }
     }
 
+    setProcessing(true, 'Validating mod files...');
+    
+    // Validate that we have VPK files or archives that will be processed during installation
     const filesList = await readDir(filesDir, { baseDir: BaseDirectory.AppLocalData });
     const hasVpk = filesList.some((e) => /\.vpk$/i.test(e.name || ''));
-    if (!hasVpk && detected.kind === 'archive') {
-      await writeBytes(await join(modDir, detected.file.name), await toBytes(detected.file));
+    
+    console.log('Files in files directory:', filesList.map(f => f.name));
+    console.log('Has VPK files:', hasVpk);
+    
+    if (!hasVpk) {
+      if (detected.kind === 'archive') {
+        const name = detected.file.name.toLowerCase();
+        if (name.endsWith('.rar') || name.endsWith('.7z')) {
+          // RAR/7ZIP archives are stored and will be processed during installation
+          console.log('RAR/7ZIP archive will be processed during installation');
+          toast.info('Archive will be processed during mod installation');
+        } else {
+          // For other archives, store them as fallback
+          console.log('Storing archive as fallback');
+          await writeBytes(await join(modDir, detected.file.name), await toBytes(detected.file));
+          toast.warning('No VPK found - archive stored for manual processing');
+        }
+      } else {
+        console.error('No VPK files found in the uploaded content');
+        toast.error('No VPK files found in the uploaded content');
+        setProcessing(false);
+        return;
+      }
+    } else {
+      console.log('VPK files found, proceeding with mod creation');
     }
 
+    setProcessing(true, 'Saving mod metadata...');
+    
     const metadata = {
       id: modId,
       kind: 'local',
@@ -263,6 +322,8 @@ const AddMods = () => {
     };
     await writeText(await join(modDir, 'metadata.json'), JSON.stringify(metadata, null, 2));
 
+    setProcessing(true, 'Processing mod image...');
+    
     const imageDataUrl =
       meta.imageFile
         ? await fileToDataUrl(meta.imageFile)
@@ -270,7 +331,10 @@ const AddMods = () => {
             `<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360"><defs><linearGradient id="g" x1="0" x2="1" y1="0" y2="1"><stop stop-color="#1f2937" offset="0"/><stop stop-color="#111827" offset="1"/></linearGradient></defs><rect width="100%" height="100%" fill="url(#g)"/><g font-family="Inter, Arial, sans-serif" fill="#E5E7EB" text-anchor="middle"><text x="50%" y="48%" font-size="36" font-weight="700">MOD</text><text x="50%" y="62%" font-size="14" fill="#9CA3AF">No image provided</text></g></svg>`
           );
 
+    setProcessing(true, 'Adding mod to library...');
+    
     const modDto: any = {
+      id: modId,
       remoteId: modId,
       name: metadata.name,
       description: metadata.description ?? '',
@@ -291,8 +355,10 @@ const AddMods = () => {
     setModPath(modId, modDir);
     setModStatus(modId, ModStatus.DOWNLOADED);
 
+    setProcessing(true, 'Mod added successfully!');
     toast.success(`Added: ${meta.name}`);
     setOpen(false);
+    setProcessing(false);
   };
 
   const UrlHint = (
@@ -304,7 +370,7 @@ const AddMods = () => {
 
   return (
     <div className="h-full w-full">
-      <div className="space-y-4 px-6 md:px-8">
+      <div className="space-y-4 px-4">
         <PageTitle title="Add Mods" description="Add a mod via URL or by uploading files. Drag & drop is supported." />
 
         <Card className="w-full border-0 shadow">
@@ -355,7 +421,7 @@ const AddMods = () => {
                 <UploadSimple className="h-5 w-5" />
                 <h3 className="text-sm font-semibold">Add Files</h3>
               </div>
-              <p className="text-xs text-muted-foreground">Drop a .vpk, a folder with .vpk, or a .zip/.rar/.7z archive.</p>
+              <p className="text-xs text-muted-foreground">Drop a .vpk, or a .zip/.rar/.7z archive.</p>
 
               <div
                 onDragEnter={(e) => { e.preventDefault(); setDragging(true); }}
@@ -392,7 +458,7 @@ const AddMods = () => {
                 <div className="pointer-events-none text-center">
                   <UploadSimple className="mx-auto h-8 w-8" />
                   <div className="mt-2 text-sm font-medium">Drop files/folders here, or click to select</div>
-                  <div className="text-xs text-muted-foreground">Supported: .vpk, folder with .vpk, .zip/.rar/.7z</div>
+                  <div className="text-xs text-muted-foreground">Supported: .vpk/.zip/.rar/.7z</div>
                 </div>
               </div>
             </div>
@@ -445,8 +511,10 @@ const AddMods = () => {
           </div>
 
           <DialogFooter className="mt-2">
-            <Button type="button" variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
-            <Button type="button" onClick={finalize}>Add</Button>
+            <Button type="button" variant="ghost" onClick={() => setOpen(false)} disabled={isProcessing}>Cancel</Button>
+            <Button type="button" onClick={finalize} disabled={isProcessing}>
+              {isProcessing ? 'Processing...' : 'Add'}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

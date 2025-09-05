@@ -4,14 +4,12 @@ import {
   ArrowLeft,
   Calendar,
   Download,
-  Music,
   Tag,
   Trash,
   Upload,
   User,
-  Volume2,
 } from 'lucide-react';
-import { useEffect, useRef } from 'react';
+import { useEffect } from 'react';
 import { useQuery } from 'react-query';
 import { useNavigate, useParams } from 'react-router';
 import { toast } from 'sonner';
@@ -45,7 +43,6 @@ import { ModStatus } from '@/types/mods';
 const Mod = () => {
   const params = useParams();
   const navigate = useNavigate();
-  const audioRef = useRef<HTMLAudioElement>(null);
   const { data, error } = useQuery({
     queryKey: ['mod', params.id],
     queryFn: () => {
@@ -156,26 +153,8 @@ const Mod = () => {
         )}
 
         <Card className="overflow-hidden">
-          {/* Hero section - Audio or Image */}
-          {data.isAudio && data.audioUrl ? (
-            <div className="relative h-64 w-full bg-gradient-to-br from-muted via-secondary to-accent">
-              <div className="absolute inset-0 flex flex-col items-center justify-center">
-                <div className="mb-6 flex flex-col items-center gap-4">
-                  <Music className="h-16 w-16 text-primary" />
-                </div>
-              </div>
-              <div className="absolute bottom-0 left-0 p-6">
-                <h1 className="font-bold text-3xl text-primary">{data.name}</h1>
-                <p className="mt-2 text-primary/80">{data.category}</p>
-                <Badge className="mt-2" variant="secondary">
-                  Audio Mod
-                </Badge>
-              </div>
-              {data.audioUrl && (
-                <audio preload="metadata" ref={audioRef} src={data.audioUrl} />
-              )}
-            </div>
-          ) : data.hero && hasImages ? (
+          {/* Hero image */}
+          {data.hero && (
             <div className="relative h-64 w-full bg-gradient-to-r from-gray-900 to-gray-800">
               <img
                 alt={`${data.name} hero`}
@@ -190,20 +169,20 @@ const Mod = () => {
                 <p className="mt-2 text-gray-200">{data.category}</p>
               </div>
             </div>
-          ) : null}
+          )}
 
           {/* Main content */}
           <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
             {/* Left side - Info */}
             <div className="md:col-span-2">
-              {!(data.hero || data.isAudio) && (
+              {!data.hero && (
                 <CardHeader>
                   <CardTitle className="text-3xl">{data.name}</CardTitle>
                   <CardDescription>{data.category}</CardDescription>
                 </CardHeader>
               )}
 
-              <CardContent className={data.hero || data.isAudio ? '' : 'pt-2'}>
+              <CardContent className={data.hero ? '' : 'pt-2'}>
                 <div className="space-y-4">
                   {/* Description */}
                   <div className="prose prose-sm dark:prose-invert">
@@ -363,27 +342,8 @@ const Mod = () => {
           </CardFooter>
         </Card>
 
-        {/* Image Gallery or Audio Preview */}
-        {data.isAudio && data.audioUrl ? (
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Volume2 className="h-5 w-5" />
-                Audio Preview
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="flex flex-col items-center space-y-6 p-8">
-                <audio
-                  className="w-full"
-                  controls
-                  preload="metadata"
-                  src={data.audioUrl}
-                />
-              </div>
-            </CardContent>
-          </Card>
-        ) : hasImages ? (
+        {/* Image Gallery */}
+        {hasImages && (
           <Card>
             <CardHeader>
               <CardTitle>Gallery</CardTitle>
@@ -418,7 +378,7 @@ const Mod = () => {
               </Carousel>
             </CardContent>
           </Card>
-        ) : null}
+        )}
       </div>
     </div>
   );

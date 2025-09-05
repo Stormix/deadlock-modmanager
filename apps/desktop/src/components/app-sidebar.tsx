@@ -106,6 +106,7 @@ const DownloadProgress = () => {
     return null;
   }
 
+  // Calculate the combined progress of all downloads
   let totalProgress = 0;
   let modsWithProgress = 0;
 

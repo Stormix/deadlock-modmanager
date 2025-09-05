@@ -260,35 +260,11 @@ impl ModManager {
         mod_files_path: &std::path::Path,
     ) -> Result<Vec<String>, Error> {
         let mut installed_vpks = Vec::new();
-        let mut vpk_files = Vec::new();
 
-        // First collect all VPK files
-        for entry in fs::read_dir(temp_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-
-            if path.is_dir() {
-                let mut sub_vpks = self.copy_vpks_from_temp(&path, mod_files_path)?;
-                installed_vpks.append(&mut sub_vpks);
-            } else if path.extension().map_or(false, |ext| ext == "vpk") {
-                vpk_files.push(path);
-            }
-        }
-
-        // Sort VPK files to ensure consistent ordering
-        vpk_files.sort();
-
-        // Get the highest existing VPK number
-        let mut current_number = self.find_highest_vpk_number(mod_files_path)?;
-
-        // Copy and rename VPK files with sequential numbering
-        for vpk_path in vpk_files {
-            current_number += 1;
-            let new_name = format!("pak{:02}_dir.vpk", current_number);
-            let new_path = mod_files_path.join(&new_name);
-
-            fs::copy(&vpk_path, &new_path)?;
-            installed_vpks.push(new_name);
+        // Find and copy only the first VPK file
+        if let Some(first_vpk) = self.find_and_copy_first_vpk(temp_dir, mod_files_path)? {
+            installed_vpks.push(first_vpk);
+            log::info!("Copied first VPK file: {} to mod files directory", installed_vpks[0]);
         }
 
         Ok(installed_vpks)
@@ -298,81 +274,220 @@ impl ModManager {
         let zip_file = File::open(path)?;
         let mut archive = zip::ZipArchive::new(zip_file)?;
 
+        log::info!("Extracting ZIP archive with {} entries", archive.len());
+
         for i in 0..archive.len() {
             let mut file = archive.by_index(i)?;
-            if !file.name().ends_with(".vpk") {
-                // Still extract directories and non-VPK files to maintain structure
-                let outpath = temp_dir.join(file.name());
-                if let Some(p) = outpath.parent() {
-                    fs::create_dir_all(p)?;
-                }
-                if !file.name().ends_with('/') {
-                    let mut outfile = fs::File::create(&outpath)?;
-                    std::io::copy(&mut file, &mut outfile)?;
-                }
-            } else {
-                let outpath = temp_dir.join(file.name());
-                if let Some(p) = outpath.parent() {
-                    fs::create_dir_all(p)?;
-                }
-                let mut outfile = fs::File::create(&outpath)?;
-                std::io::copy(&mut file, &mut outfile)?;
+            let file_name = file.name().to_string();
+            
+            // Skip directory entries
+            if file_name.ends_with('/') {
+                continue;
+            }
+
+            let outpath = temp_dir.join(&file_name);
+            if let Some(p) = outpath.parent() {
+                fs::create_dir_all(p)?;
+            }
+
+            let mut outfile = fs::File::create(&outpath)?;
+            std::io::copy(&mut file, &mut outfile)?;
+            
+            if file_name.ends_with(".vpk") {
+                log::info!("Extracted VPK file: {}", file_name);
             }
         }
+        
+        log::info!("ZIP extraction completed successfully");
         Ok(())
     }
 
     fn extract_rar(&self, path: &PathBuf, temp_dir: &std::path::Path) -> Result<(), Error> {
+        log::info!("Extracting RAR archive: {:?}", path);
+        
         let mut archive = Archive::new(path.to_string_lossy().as_ref()).open_for_processing()?;
+        let mut extracted_files = 0;
 
         while let Some(header) = archive.read_header()? {
             archive = if !header.entry().is_file() {
                 header.skip()?
             } else {
+                let entry = header.entry();
+                if entry.filename.ends_with(".vpk") {
+                    log::info!("Found VPK file in RAR: {}", entry.filename.display());
+                }
+                extracted_files += 1;
                 // Extract everything to maintain directory structure
                 header.extract_with_base(&temp_dir)?
             };
         }
+        
+        log::info!("RAR extraction completed successfully, extracted {} files", extracted_files);
         Ok(())
     }
 
     fn extract_7z(&self, path: &PathBuf, temp_dir: &std::path::Path) -> Result<(), Error> {
+        log::info!("Extracting 7ZIP archive: {:?}", path);
+        
         sevenz_rust::decompress_file(
             path.to_string_lossy().as_ref(),
             temp_dir.to_string_lossy().as_ref(),
         )
         .map_err(|e| Error::ModExtractionFailed(e.to_string()))?;
+        
+        log::info!("7ZIP extraction completed successfully");
         Ok(())
     }
 
-    pub fn install_mod(&mut self, mut deadlock_mod: Mod) -> Result<Mod, Error> {
-        log::info!("Starting installation of mod: {}", deadlock_mod.name);
-
-        if !deadlock_mod.path.exists() {
-            return Err(Error::ModFileNotFound);
+    pub fn extract_archive(&self, archive_path: &str, target_path: &str) -> Result<Vec<String>, Error> {
+        let archive_path = PathBuf::from(archive_path);
+        let target_path = PathBuf::from(target_path);
+        
+        log::info!("Extracting archive: {:?} to {:?}", archive_path, target_path);
+        
+        // Create target directory if it doesn't exist
+        if !target_path.exists() {
+            fs::create_dir_all(&target_path)?;
         }
-        if !self.game_setup {
-            log::info!("Setting up game for mods...");
-            self.setup_game_for_mods()?;
+        
+        let mut extracted_vpks = Vec::new();
+        
+        match archive_path.extension().and_then(|e| e.to_str()) {
+            Some("zip") => {
+                self.extract_zip(&archive_path, &target_path)?;
+            }
+            Some("rar") => {
+                self.extract_rar(&archive_path, &target_path)?;
+            }
+            Some("7z") => {
+                self.extract_7z(&archive_path, &target_path)?;
+            }
+            _ => {
+                return Err(Error::ModExtractionFailed("Unsupported archive format".into()));
+            }
         }
-        if self.mods.contains_key(&deadlock_mod.id) {
-            log::warn!("Mod {} already installed", deadlock_mod.name);
-            return Err(Error::ModAlreadyInstalled(deadlock_mod.name));
+        
+        // Find the first VPK file and copy it to the target directory
+        let first_vpk = self.find_and_copy_first_vpk(&target_path, &target_path)?;
+        if let Some(vpk_name) = first_vpk {
+            extracted_vpks.push(vpk_name);
+            log::info!("Copied first VPK file: {} to files directory", extracted_vpks[0]);
         }
+        
+        Ok(extracted_vpks)
+    }
+    
+    fn find_and_copy_first_vpk(&self, search_dir: &std::path::Path, target_dir: &std::path::Path) -> Result<Option<String>, Error> {
+        for entry in fs::read_dir(search_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            
+            if path.is_dir() {
+                // Recursively search subdirectories
+                if let Some(vpk_name) = self.find_and_copy_first_vpk(&path, target_dir)? {
+                    return Ok(Some(vpk_name));
+                }
+            } else if path.extension().map_or(false, |ext| ext == "vpk") {
+                // Found a VPK file, copy it to target directory with proper numbering
+                let current_number = self.find_highest_vpk_number(target_dir)? + 1;
+                let new_name = format!("pak{:02}_dir.vpk", current_number);
+                let target_path = target_dir.join(&new_name);
+                
+                log::info!("Copying VPK file from {:?} to {:?}", path, target_path);
+                fs::copy(&path, &target_path)?;
+                
+                return Ok(Some(new_name));
+            }
+        }
+        
+        Ok(None)
+    }
+    
+    fn find_vpk_files_recursive(&self, dir: &std::path::Path) -> Result<Vec<String>, Error> {
+        let mut vpks = Vec::new();
+        
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            
+            if path.is_dir() {
+                let mut sub_vpks = self.find_vpk_files_recursive(&path)?;
+                vpks.append(&mut sub_vpks);
+            } else if path.extension().map_or(false, |ext| ext == "vpk") {
+                vpks.push(path.file_name().unwrap().to_string_lossy().to_string());
+            }
+        }
+        
+        Ok(vpks)
+    }
 
-        if let Some(game_path) = &self.game_path {
-            let mod_files_path = deadlock_mod.path.join("files");
+pub fn install_mod(&mut self, mut deadlock_mod: Mod) -> Result<Mod, Error> {
+    log::info!("Starting installation of mod: {}", deadlock_mod.name);
 
+    if !deadlock_mod.path.exists() {
+        return Err(Error::ModFileNotFound);
+    }
+    if !self.game_setup {
+        log::info!("Setting up game for mods...");
+        self.setup_game_for_mods()?;
+    }
+    if self.mods.contains_key(&deadlock_mod.id) {
+        log::warn!("Mod {} already installed", deadlock_mod.name);
+        return Err(Error::ModAlreadyInstalled(deadlock_mod.name));
+    }
+
+    if let Some(game_path) = &self.game_path {
+        let mod_files_path = deadlock_mod.path.join("files");
+
+        // Check if files directory exists and has VPK files
+        let existing_vpks = if mod_files_path.exists() {
+            let mut vpks = Vec::new();
+            for entry in fs::read_dir(&mod_files_path)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().map_or(false, |ext| ext == "vpk") {
+                    vpks.push(path.file_name().unwrap().to_string_lossy().to_string());
+                }
+            }
+            vpks
+        } else {
+            Vec::new()
+        };
+
+        // Only process archives if there are no VPK files in the files directory
+        let has_vpk_files = existing_vpks.len() > 0;
+        log::info!("VPK check: existing_vpks={:?}, has_vpk_files={}", existing_vpks, has_vpk_files);
+        let has_archives = fs::read_dir(&deadlock_mod.path)?
+            .filter_map(|e| e.ok())
+            .any(|e| {
+                let path = e.path();
+                path.extension().map_or(false, |ext| {
+                    matches!(ext.to_str(), Some("zip") | Some("rar") | Some("7z"))
+                })
+            });
+
+        // Only process archives if we don't have VPK files already
+        if has_archives && !has_vpk_files {
+            log::info!("No VPK files found, processing archives...");
             if mod_files_path.exists() {
                 log::info!("Clearing existing mod cache at: {:?}", mod_files_path);
                 fs::remove_dir_all(&mod_files_path)?;
             }
             fs::create_dir_all(&mod_files_path)?;
             log::info!("Created mod files directory at: {:?}", mod_files_path);
+        } else if !mod_files_path.exists() {
+            fs::create_dir_all(&mod_files_path)?;
+            log::info!("Created mod files directory at: {:?}", mod_files_path);
+        } else {
+            log::info!("Using existing mod files directory at: {:?}", mod_files_path);
+        }
 
-            let mut all_vpks: Vec<String> = Vec::new();
-            let mut direct_vpks: Vec<PathBuf> = Vec::new();
+        let mut all_vpks: Vec<String> = Vec::new();
+        let mut direct_vpks: Vec<PathBuf> = Vec::new();
 
+        // Only process archives if we don't have VPK files already
+        if !has_vpk_files {
+            log::info!("No VPK files found, processing archives...");
             for entry in fs::read_dir(&deadlock_mod.path)? {
                 let entry = entry?;
                 let path = entry.path();
@@ -414,43 +529,50 @@ impl ModManager {
                     }
                 }
             }
-
-            if !direct_vpks.is_empty() {
-                direct_vpks.sort();
-                let mut current_number = self.find_highest_vpk_number(&mod_files_path)?;
-                for vpk in direct_vpks {
-                    current_number += 1;
-                    let new_name = format!("pak{:02}_dir.vpk", current_number);
-                    let new_path = mod_files_path.join(&new_name);
-                    fs::copy(&vpk, &new_path)?;
-                    all_vpks.push(new_name);
-                }
-            }
-
-           let has_vpk_in_files = fs::read_dir(&mod_files_path)?
-            .filter_map(|e| e.ok())
-                .any(|e| e.path().extension().map_or(false, |ext| ext == "vpk"));
-
-            if all_vpks.is_empty() && !has_vpk_in_files {
-                log::error!("No VPK files found in mod");
-                return Err(Error::ModInvalid("No VPK files found in mod".into()));
-            }
-
-            let addons_path = game_path.join("game").join("citadel").join("addons");
-            log::info!("Installing VPKs to game addons: {:?}", addons_path);
-            let installed_vpks = self.copy_vpks_from_temp(&mod_files_path, &addons_path)?;
-
-            deadlock_mod.installed_vpks = installed_vpks;
-           log::info!("Adding mod to managed mods list");
-           self.mods.insert(deadlock_mod.id.clone(), deadlock_mod.clone());
-
-           log::info!("Mod installation completed successfully");
-           Ok(deadlock_mod)
         } else {
-            log::error!("Game path not set");
-            Err(Error::GamePathNotSet)
+            log::info!("VPK files already exist, skipping archive processing");
         }
+
+        // Only process direct VPKs if we don't have VPK files already
+        if !direct_vpks.is_empty() && !has_vpk_files {
+            log::info!("Processing direct VPK files...");
+            direct_vpks.sort();
+            let mut current_number = self.find_highest_vpk_number(&mod_files_path)?;
+            for vpk in direct_vpks {
+                current_number += 1;
+                let new_name = format!("pak{:02}_dir.vpk", current_number);
+                let new_path = mod_files_path.join(&new_name);
+                fs::copy(&vpk, &new_path)?;
+                all_vpks.push(new_name);
+            }
+        } else if !direct_vpks.is_empty() {
+            log::info!("VPK files already exist, skipping direct VPK processing");
+        }
+
+        log::info!("VPK validation: all_vpks={}, has_vpk_in_files={}, existing_vpks={}", 
+                   all_vpks.len(), has_vpk_files, existing_vpks.len());
+
+        if all_vpks.is_empty() && !has_vpk_files {
+            log::error!("No VPK files found in mod after processing all archives");
+            return Err(Error::ModInvalid("No VPK files found in mod after processing all archives".into()));
+        }
+
+        let addons_path = game_path.join("game").join("citadel").join("addons");
+        log::info!("Installing VPKs to game addons: {:?}", addons_path);
+        let installed_vpks = self.copy_vpks_from_temp(&mod_files_path, &addons_path)?;
+
+        deadlock_mod.installed_vpks = installed_vpks;
+        log::info!("Adding mod to managed mods list");
+        self.mods.insert(deadlock_mod.id.clone(), deadlock_mod.clone());
+
+        log::info!("Mod installation completed successfully");
+        Ok(deadlock_mod)
+    } else {
+        log::error!("Game path not set");
+        Err(Error::GamePathNotSet)
     }
+}
+
 
     pub fn toggle_mods(&mut self, vanilla: bool) -> Result<(), Error> {
         if let Some(game_path) = &self.game_path {

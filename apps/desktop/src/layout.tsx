@@ -5,6 +5,7 @@ import { Dialog } from './components/ui/dialog';
 import { SidebarProvider } from './components/ui/sidebar';
 import { Toaster } from './components/ui/sonner';
 import { WhatsNewDialog } from './components/whats-new-dialog';
+import { ProgressProvider, ProgressIndicator } from './components/progress-indicator';
 import useWhatsNew from './hooks/use-whats-new';
 import { cn } from './lib/utils';
 
@@ -12,7 +13,7 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
   const { showWhatsNew, markVersionAsSeen } = useWhatsNew();
 
   return (
-    <>
+    <ProgressProvider>
       <main className="h-screen overflow-hidden">
         <Menu />
         <SidebarProvider>
@@ -24,6 +25,7 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
         </SidebarProvider>
       </main>
       <Toaster />
+      <ProgressIndicator />
 
       <Dialog
         onOpenChange={(open) => !open && markVersionAsSeen()}
@@ -31,6 +33,6 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
       >
         <WhatsNewDialog onClose={markVersionAsSeen} />
       </Dialog>
-    </>
+    </ProgressProvider>
   );
 };

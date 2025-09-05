@@ -12,17 +12,17 @@ const useUninstall = () => {
   const uninstall = async (mod: LocalMod, remove: boolean) => {
     try {
       let shouldUninstall = true;
-      if (mod.status === ModStatus.INSTALLED) {
-        shouldUninstall = !!(remove
-          ? await confirm({
-              title:
-                'Are you sure you want to uninstall this mod? This will disable the mod and remove it from your mods list.',
-              body: 'This action cannot be undone.',
-              actionButton: 'Uninstall',
-              cancelButton: 'Cancel',
-            })
-          : true);
+      
+      // Show confirmation dialog for remove action regardless of mod status
+      if (remove) {
+        shouldUninstall = !!(await confirm({
+          title: 'Are you sure you want to remove this mod? This will delete the mod from your mods list and remove all files.',
+          body: 'This action cannot be undone.',
+          actionButton: 'Remove',
+          cancelButton: 'Cancel',
+        }));
       }
+      
       if (!shouldUninstall) {
         return;
       }
@@ -47,6 +47,13 @@ const useUninstall = () => {
       }
 
       if (remove) {
+        // Always purge the mod from AppData when removing, regardless of installation status
+        if (mod.status !== ModStatus.INSTALLED) {
+          await invoke('purge_mod', {
+            modId: mod.remoteId,
+            vpks: mod.installedVpks ?? [],
+          });
+        }
         await removeMod(mod.remoteId);
       }
       toast.success('Mod uninstalled successfully');
